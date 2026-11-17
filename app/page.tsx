@@ -77,7 +77,12 @@ export default function Home() {
         method: "POST",
         body: item.file,
       });
-      if (!res.ok) throw new Error((await res.json()).error ?? "Erreur inconnue");
+      if (!res.ok) {
+        const raw = await res.text();
+        let msg = "";
+        try { msg = JSON.parse(raw).error; } catch {}
+        throw new Error(msg || (res.status === 413 ? "Fichier trop gros pour le serveur." : `Erreur serveur (${res.status}).`));
+      }
       if (toText) patch(item.id, { status: "done", text: (await res.json()).text });
       else patch(item.id, { status: "done", url: URL.createObjectURL(await res.blob()) });
     } catch (e) {

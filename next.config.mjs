@@ -1,4 +1,4 @@
 /** @type {import('next').NextConfig} */
 export default {
-  experimental: { serverComponentsExternalPackages: ["openai"] },
+  experimental: { serverComponentsExternalPackages: ["openai", "ffmpeg-static"] },
 };

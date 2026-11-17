@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import ffmpegStatic from "ffmpeg-static";
 import { createWriteStream } from "node:fs";
 import { mkdtemp, rm, readFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -8,9 +9,11 @@ import { pipeline } from "node:stream/promises";
 
 export const MAX_UPLOAD = 1024 * 1024 * 1024; // 1 Go
 
+const FFMPEG = process.env.FFMPEG_PATH || ffmpegStatic || "ffmpeg";
+
 function run(args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
-    const p = spawn("ffmpeg", ["-y", "-loglevel", "error", ...args]);
+    const p = spawn(FFMPEG, ["-y", "-loglevel", "error", ...args]);
     let err = "";
     p.stderr.on("data", (d) => (err += d));
     p.on("error", () => reject(new Error("FFmpeg est introuvable sur le serveur.")));
