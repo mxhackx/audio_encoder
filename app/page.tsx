@@ -13,6 +13,8 @@ type Item = {
   id: number;
   file: File;
   status: "idle" | "loading" | "done" | "error";
+  label?: string;
+  pct?: number; // undefined = barre indéterminée
   text?: string;
   url?: string;
   error?: string;
@@ -69,24 +71,68 @@ export default function Home() {
     if (input.current) input.current.value = "";
   }
 
-  async function convertOne(item: Item) {
-    patch(item.id, { status: "loading", error: undefined, text: undefined, url: undefined });
-    const qs = new URLSearchParams({ name: item.file.name, language });
-    try {
-      const res = await fetch((toText ? "/api/transcribe?" : "/api/extract?") + qs, {
-        method: "POST",
-        body: item.file,
-      });
-      if (!res.ok) {
-        const raw = await res.text();
-        let msg = "";
-        try { msg = JSON.parse(raw).error; } catch {}
-        throw new Error(msg || (res.status === 413 ? "Fichier trop gros pour le serveur." : `Erreur serveur (${res.status}).`));
+  // XHR plutôt que fetch : seul moyen d'avoir la progression de l'envoi.
+  function request(item: Item, toText: boolean): Promise<{ blob?: Blob; text?: string }> {
+    return new Promise((resolve, reject) => {
+      const qs = new URLSearchParams({ name: item.file.name, language });
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", (toText ? "/api/transcribe?" : "/api/extract?") + qs);
+      if (!toText) xhr.responseType = "blob";
+      let seen = 0;
+      let result: string | undefined;
+      let failure = "";
+      let total = 0;
+
+      xhr.upload.onprogress = (e) => {
+        if (!e.lengthComputable) return;
+        const pct = Math.round((e.loaded / e.total) * 100);
+        patch(item.id, pct < 100
+          ? { label: `Envoi… ${pct} %`, pct }
+          : { label: toText ? "Extraction de l'audio…" : "Conversion en MP3…", pct: undefined });
+      };
+
+      if (toText) {
+        xhr.onprogress = () => {
+          const lines = xhr.responseText.slice(seen).split("\n");
+          lines.pop(); // dernière ligne éventuellement incomplète
+          seen += lines.reduce((n, l) => n + l.length + 1, 0);
+          for (const l of lines.filter(Boolean)) {
+            let m: any;
+            try { m = JSON.parse(l); } catch { continue; }
+            if (m.total) { total = m.total; patch(item.id, { label: `Transcription 0/${total}`, pct: 0 }); }
+            if (m.done) patch(item.id, { label: `Transcription ${m.done}/${total}`, pct: (m.done / total) * 100 });
+            if (m.text !== undefined) result = m.text;
+            if (m.error) failure = m.error;
+          }
+        };
       }
-      if (toText) patch(item.id, { status: "done", text: (await res.json()).text });
-      else patch(item.id, { status: "done", url: URL.createObjectURL(await res.blob()) });
+
+      xhr.onerror = () => reject(new Error("Connexion au serveur impossible."));
+      xhr.onload = async () => {
+        if (xhr.status !== 200) {
+          let msg = "";
+          try {
+            const raw = toText ? xhr.responseText : await (xhr.response as Blob).text();
+            msg = JSON.parse(raw).error;
+          } catch {}
+          return reject(new Error(msg || (xhr.status === 413 ? "Fichier trop gros pour le serveur." : `Erreur serveur (${xhr.status}).`)));
+        }
+        if (!toText) return resolve({ blob: xhr.response });
+        xhr.onprogress?.(null as any); // vide les dernières lignes
+        failure ? reject(new Error(failure)) : resolve({ text: result ?? "" });
+      };
+      xhr.send(item.file);
+    });
+  }
+
+  async function convertOne(item: Item) {
+    patch(item.id, { status: "loading", error: undefined, text: undefined, url: undefined, label: "Envoi… 0 %", pct: 0 });
+    try {
+      const r = await request(item, toText);
+      if (toText) patch(item.id, { status: "done", text: r.text, label: undefined });
+      else patch(item.id, { status: "done", url: URL.createObjectURL(r.blob!), label: undefined });
     } catch (e) {
-      patch(item.id, { status: "error", error: (e as Error).message });
+      patch(item.id, { status: "error", error: (e as Error).message, label: undefined });
     }
   }
 
@@ -153,6 +199,17 @@ export default function Home() {
                 )}
               </div>
               <Preview file={i.file} />
+              {i.status === "loading" && (
+                <div>
+                  <p className="mb-1 text-xs text-slate-500">{i.label}</p>
+                  <div className="h-2 overflow-hidden rounded-full bg-slate-200">
+                    <div
+                      className={`h-full rounded-full bg-indigo-600 transition-all ${i.pct === undefined ? "w-full animate-pulse" : ""}`}
+                      style={i.pct === undefined ? undefined : { width: `${i.pct}%` }}
+                    />
+                  </div>
+                </div>
+              )}
               {i.status === "error" && <p className="rounded-md bg-red-50 p-2 text-xs text-red-700">{i.error}</p>}
               {i.url && (
                 <div className="space-y-2">
