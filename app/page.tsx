@@ -1,57 +1,97 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { AudioLines, Copy, Download, Loader2, Upload } from "lucide-react";
+import { AudioLines, Copy, Download, Loader2, Upload, X } from "lucide-react";
 
-const INPUTS = ["MP4", "MP3", "WAV", "M4A"];
+const VIDEO_IN = ["MP4", "MOV"];
+const AUDIO_IN = ["MP3", "WAV", "M4A"];
+const INPUTS = [...VIDEO_IN, ...AUDIO_IN];
 const OUTPUTS = ["MP3", "Texte"];
+const MAX = 1024 * 1024 * 1024;
+
+type Item = {
+  id: number;
+  file: File;
+  status: "idle" | "loading" | "done" | "error";
+  text?: string;
+  url?: string;
+  error?: string;
+};
+
+let nextId = 1;
+
+function Preview({ file }: { file: File }) {
+  const [url, setUrl] = useState("");
+  useEffect(() => {
+    const u = URL.createObjectURL(file);
+    setUrl(u);
+    return () => URL.revokeObjectURL(u);
+  }, [file]);
+  if (!url) return null;
+  return /\.(mp4|mov)$/i.test(file.name) ? (
+    <video src={url} controls muted playsInline className="max-h-44 w-full rounded-lg bg-black" />
+  ) : (
+    <audio src={url} controls className="w-full" />
+  );
+}
 
 export default function Home() {
   const [inFmt, setInFmt] = useState("MP4");
   const [outFmt, setOutFmt] = useState("MP3");
   const [language, setLanguage] = useState("auto");
-  const [file, setFile] = useState<File | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [items, setItems] = useState<Item[]>([]);
   const [error, setError] = useState("");
-  const [text, setText] = useState("");
-  const [audioUrl, setAudioUrl] = useState("");
+  const [running, setRunning] = useState(false);
   const input = useRef<HTMLInputElement>(null);
 
   const toText = outFmt === "Texte";
-  const [preview, setPreview] = useState("");
-  useEffect(() => {
-    if (!file) return setPreview("");
-    const url = URL.createObjectURL(file);
-    setPreview(url);
-    return () => URL.revokeObjectURL(url);
-  }, [file]);
+  const kind = VIDEO_IN.includes(inFmt) ? "vidéos" : "audios";
 
-  function reset() {
-    setText("");
-    setError("");
-    setAudioUrl("");
+  function patch(id: number, p: Partial<Item>) {
+    setItems((all) => all.map((i) => (i.id === id ? { ...i, ...p } : i)));
   }
 
-  async function convert() {
-    if (!file) return;
-    setLoading(true);
-    reset();
-    const body = new FormData();
-    body.append("file", file);
-    body.append("language", language);
+  function clear() {
+    items.forEach((i) => i.url && URL.revokeObjectURL(i.url));
+    setItems([]);
+    setError("");
+  }
+
+  function addFiles(list: FileList | null) {
+    if (!list) return;
+    const files = Array.from(list);
+    const tooBig = files.filter((f) => f.size > MAX);
+    setError(tooBig.length ? `Trop gros (max 1 Go) : ${tooBig.map((f) => f.name).join(", ")}` : "");
+    setItems((all) => [
+      ...all,
+      ...files.filter((f) => f.size <= MAX).map((file) => ({ id: nextId++, file, status: "idle" as const })),
+    ]);
+    if (input.current) input.current.value = "";
+  }
+
+  async function convertOne(item: Item) {
+    patch(item.id, { status: "loading", error: undefined, text: undefined, url: undefined });
+    const qs = new URLSearchParams({ name: item.file.name, language });
     try {
-      const res = await fetch(toText ? "/api/transcribe" : "/api/extract", { method: "POST", body });
+      const res = await fetch((toText ? "/api/transcribe?" : "/api/extract?") + qs, {
+        method: "POST",
+        body: item.file,
+      });
       if (!res.ok) throw new Error((await res.json()).error ?? "Erreur inconnue");
-      if (toText) setText((await res.json()).text);
-      else setAudioUrl(URL.createObjectURL(await res.blob()));
+      if (toText) patch(item.id, { status: "done", text: (await res.json()).text });
+      else patch(item.id, { status: "done", url: URL.createObjectURL(await res.blob()) });
     } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setLoading(false);
+      patch(item.id, { status: "error", error: (e as Error).message });
     }
   }
 
-  const base = file?.name.replace(/\.[^.]+$/, "") ?? "resultat";
+  async function convertAll() {
+    setRunning(true);
+    for (const item of items) await convertOne(item); // un par un
+    setRunning(false);
+  }
+
+  const base = (f: File) => f.name.replace(/\.[^.]+$/, "");
   const sel = "w-full rounded-md border border-slate-300 bg-white p-2 text-sm";
 
   return (
@@ -61,13 +101,13 @@ export default function Home() {
       <div className="grid grid-cols-2 gap-3">
         <label className="text-xs font-medium text-slate-500">
           Format d&apos;entrée
-          <select className={sel} value={inFmt} onChange={(e) => (setInFmt(e.target.value), setFile(null), reset())}>
+          <select className={sel} value={inFmt} onChange={(e) => (setInFmt(e.target.value), clear())}>
             {INPUTS.map((f) => <option key={f}>{f}</option>)}
           </select>
         </label>
         <label className="text-xs font-medium text-slate-500">
           Format de sortie
-          <select className={sel} value={outFmt} onChange={(e) => (setOutFmt(e.target.value), reset())}>
+          <select className={sel} value={outFmt} onChange={(e) => (setOutFmt(e.target.value), clear())}>
             {OUTPUTS.map((f) => <option key={f}>{f}</option>)}
           </select>
         </label>
@@ -75,24 +115,69 @@ export default function Home() {
 
       <button
         onClick={() => input.current?.click()}
-        className="flex flex-col items-center gap-2 rounded-xl border-2 border-dashed border-slate-300 bg-white px-6 py-10 text-sm text-slate-500 hover:border-indigo-400"
+        disabled={running}
+        className="flex flex-col items-center gap-2 rounded-xl border-2 border-dashed border-slate-300 bg-white px-6 py-8 text-sm text-slate-500 hover:border-indigo-400"
       >
         <Upload className="h-7 w-7" />
-        {file ? `${file.name} (${(file.size / 1048576).toFixed(1)} Mo)` : `Choisir un fichier ${inFmt}`}
+        Choisir des {kind} {inFmt}
       </button>
-      {preview && !file?.type.startsWith("video/") && (
-        <audio src={preview} controls className="w-full" />
-      )}
-      {preview && file?.type.startsWith("video/") && (
-        <video src={preview} controls muted playsInline className="max-h-56 w-full rounded-xl bg-black" />
-      )}
       <input
         ref={input}
         type="file"
+        multiple
         hidden
         accept={"." + inFmt.toLowerCase()}
-        onChange={(e) => (setFile(e.target.files?.[0] ?? null), reset())}
+        onChange={(e) => addFiles(e.target.files)}
       />
+
+      {items.length > 0 && (
+        <ul className="space-y-4">
+          {items.map((i) => (
+            <li key={i.id} className="space-y-2 rounded-xl bg-white p-3 shadow-sm">
+              <div className="flex items-center gap-2 text-sm">
+                <span className="min-w-0 flex-1 truncate font-medium">{i.file.name}</span>
+                <span className="text-xs text-slate-400">{(i.file.size / 1048576).toFixed(1)} Mo</span>
+                {i.status === "loading" ? (
+                  <Loader2 className="h-4 w-4 animate-spin text-indigo-600" />
+                ) : (
+                  !running && (
+                    <button onClick={() => setItems((a) => a.filter((x) => x.id !== i.id))} aria-label="Retirer">
+                      <X className="h-4 w-4 text-slate-400" />
+                    </button>
+                  )
+                )}
+              </div>
+              <Preview file={i.file} />
+              {i.status === "error" && <p className="rounded-md bg-red-50 p-2 text-xs text-red-700">{i.error}</p>}
+              {i.url && (
+                <div className="space-y-2">
+                  <audio controls src={i.url} className="w-full" />
+                  <a href={i.url} download={base(i.file) + ".mp3"} className="flex items-center gap-2 text-sm font-medium text-indigo-600">
+                    <Download className="h-4 w-4" /> Télécharger le MP3
+                  </a>
+                </div>
+              )}
+              {i.text !== undefined && (
+                <div className="space-y-2">
+                  <p className="whitespace-pre-wrap text-sm leading-relaxed">{i.text}</p>
+                  <div className="flex gap-4 text-sm font-medium text-indigo-600">
+                    <button onClick={() => navigator.clipboard.writeText(i.text!)} className="flex items-center gap-1">
+                      <Copy className="h-4 w-4" /> Copier
+                    </button>
+                    <a
+                      href={"data:text/plain;charset=utf-8," + encodeURIComponent(i.text)}
+                      download={base(i.file) + ".txt"}
+                      className="flex items-center gap-1"
+                    >
+                      <Download className="h-4 w-4" /> .txt
+                    </a>
+                  </div>
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
 
       {toText && (
         <select className={sel} value={language} onChange={(e) => setLanguage(e.target.value)}>
@@ -103,42 +188,15 @@ export default function Home() {
       )}
 
       <button
-        onClick={convert}
-        disabled={!file || loading}
+        onClick={convertAll}
+        disabled={!items.length || running}
         className="flex items-center justify-center gap-2 rounded-md bg-indigo-600 py-3 font-medium text-white disabled:opacity-50"
       >
-        {loading && <Loader2 className="h-4 w-4 animate-spin" />}
-        Convertir
+        {running && <Loader2 className="h-4 w-4 animate-spin" />}
+        Convertir{items.length > 1 ? ` (${items.length})` : ""}
       </button>
 
       {error && <p className="rounded-md bg-red-50 p-3 text-sm text-red-700">{error}</p>}
-
-      {audioUrl && (
-        <div className="space-y-3">
-          <audio controls src={audioUrl} className="w-full" />
-          <a href={audioUrl} download={base + ".mp3"} className="flex items-center gap-2 text-sm font-medium text-indigo-600">
-            <Download className="h-4 w-4" /> Télécharger le MP3
-          </a>
-        </div>
-      )}
-
-      {text && (
-        <div className="space-y-3 rounded-xl bg-white p-4 shadow">
-          <p className="whitespace-pre-wrap text-sm leading-relaxed">{text}</p>
-          <div className="flex gap-4 text-sm font-medium text-indigo-600">
-            <button onClick={() => navigator.clipboard.writeText(text)} className="flex items-center gap-1">
-              <Copy className="h-4 w-4" /> Copier
-            </button>
-            <a
-              href={"data:text/plain;charset=utf-8," + encodeURIComponent(text)}
-              download={base + ".txt"}
-              className="flex items-center gap-1"
-            >
-              <Download className="h-4 w-4" /> .txt
-            </a>
-          </div>
-        </div>
-      )}
     </main>
   );
 }
